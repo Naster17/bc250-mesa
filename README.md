@@ -13,15 +13,18 @@ BC-250-specific delta.
 The BC-250 is a salvaged PS5 APU: RDNA2-class GPU (gfx1013), 16 GB unified GDDR6,
 no matrix cores. It is popular for cheap local LLM inference (llama.cpp Vulkan).
 
-Upstream Mesa conservatively excluded `CHIP_GFX1013` from accelerated integer dot
-product, grouping it with RDNA1. The hardware actually executes the RDNA2 packed
-int8 dot instructions correctly, so this exclusion leaves performance on the table.
+Upstream Mesa conservatively excluded `CHIP_GFX1013` from
+`has_accelerated_dot_product`, grouping it with RDNA1. The hardware actually
+executes the RDNA2 packed dot instructions correctly. Removing the exclusion
+enables **int8 dot4, int16 dot2 and fp16 dot2** at once (all keyed off
+`has_accelerated_dot_product`), unlocking `VK_KHR_shader_integer_dot_product`
+and `VK_VALVE_shader_mixed_float_dot_product`.
 
 ## Patches
 
 | Patch | File | Effect |
 |-------|------|--------|
-| `0001-ac-gpu_info-enable-int-dot-gfx1013` | `src/amd/common/ac_gpu_info.c` | Enable `has_accelerated_dot_product` on GFX1013 → RADV advertises `VK_KHR_shader_integer_dot_product`, ACO emits accelerated int8 dot opcodes. |
+| `0001-ac-gpu_info-enable-int-dot-gfx1013` | `src/amd/common/ac_gpu_info.c` | Enable `has_accelerated_dot_product` on GFX1013 → RADV advertises int8 dot4 + int16 dot2 (`VK_KHR_shader_integer_dot_product`) and fp16 dot2 (`VK_VALVE_shader_mixed_float_dot_product`); ACO emits the accelerated dot opcodes. |
 
 ### Verified on real BC-250 hardware (RADV GFX1013)
 
@@ -33,6 +36,25 @@ int8 dot instructions correctly, so this exclusion leaves performance on the tab
   292 GFLOPS → 1.25 TFLOPS.
 - llama.cpp flint MoE prompt processing: **662 → 862 tok/s (+30%)** (both RPC nodes
   patched). Token generation is bandwidth-bound and gains less (~+2%).
+
+## Capability audit (what else is available?)
+
+See [`docs/RDNA2-GFX1013-CAPS.md`](docs/RDNA2-GFX1013-CAPS.md) for the full
+hardware-vs-Mesa map. Summary: after this patch, **Mesa exposes everything
+standard that RDNA2 supports** — there is no further feature to enable.
+
+- Already enabled and used by ggml: int8 dot4 (MMQ), fp16 dot2 (scalar FA),
+  packed fp16 FMA. int16 dot2 is available (`dotEXT(i16vec2, i16vec2)`, see
+  `examples/`) but ggml has no int16 quant format consuming it.
+- Correctly gated (genuinely RDNA3+, do not chase): mixed-signedness sudot, bf16
+  dot, fp8 dot, int32/int64 dot, cooperative matrix/WMMA, buffer atomic-add-f32.
+- fp16 atomics: no RDNA2 hardware/ACO support. `*NonUniformIndexingNative`:
+  false on all RADV (emulated), not a gfx1013 gate.
+- int4 dot8 (`v_dot8_i32_i4`) exists in hardware but has no Vulkan feature, and
+  int4×int4 operands don't match ggml's int8 activations — no direct use.
+
+The remaining llama.cpp token-generation headroom is memory-bandwidth-bound
+(expert weight reads), not instruction-bound.
 
 ## Features
 
@@ -82,8 +104,15 @@ For multi-node RPC inference, run the patched driver on **every** node (set
 bc250-mesa/
 ├── README.md
 ├── build.sh                 # fetch upstream + apply patches + meson + ninja
-└── patches/
-    └── 0001-ac-gpu_info-enable-int-dot-gfx1013.patch
+├── LICENSE
+├── patches/
+│   └── 0001-ac-gpu_info-enable-int-dot-gfx1013.patch
+├── docs/
+│   └── RDNA2-GFX1013-CAPS.md   # full hardware-vs-Mesa capability audit
+└── examples/
+    ├── int8_dot4.comp          # dotEXT(i8vec4,i8vec4)  -> OpSDot
+    ├── int16_dot2.comp         # dotEXT(i16vec2,i16vec2) -> OpSDot
+    └── README.md               # compile + validate commands
 ```
 
 ## Notes

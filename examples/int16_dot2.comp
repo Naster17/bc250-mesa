@@ -1,0 +1,18 @@
+#version 450
+// int16 dot2 on RDNA2/gfx1013: dotEXT(i16vec2, i16vec2) -> OpSDot (v_dot2_i32_i16).
+// Requires the bc250-mesa int-dot patch (integerDotProduct16BitSignedAccelerated).
+// NOTE: the builtin is dotEXT(), NOT dot() (dot() resolves to the float builtin).
+#extension GL_EXT_integer_dot_product : require
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int16 : require
+layout(local_size_x = 64) in;
+layout(binding = 0) readonly buffer A { int16_t a[]; };
+layout(binding = 1) readonly buffer B { int16_t b[]; };
+layout(binding = 2) writeonly buffer C { int c[]; };
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    i16vec2 x = i16vec2(a[2*i], a[2*i+1]);
+    i16vec2 y = i16vec2(b[2*i], b[2*i+1]);
+    c[i] = dotEXT(x, y);                 // 2x int16 MAC -> int32
+    // unsigned: dotEXT(u16vec2(x), u16vec2(y)); mixed: dotEXT(x, u16vec2(y)) is RDNA3-only.
+}

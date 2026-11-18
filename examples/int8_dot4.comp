@@ -1,0 +1,16 @@
+#version 450
+// int8 dot4 on RDNA2/gfx1013: dotEXT(i8vec4, i8vec4) -> OpSDot (v_dot4_i32_i8).
+// Requires the bc250-mesa int-dot patch (integerDotProduct8BitSignedAccelerated).
+#extension GL_EXT_integer_dot_product : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int8 : require
+layout(local_size_x = 64) in;
+layout(binding = 0) readonly buffer A { int8_t a[]; };
+layout(binding = 1) readonly buffer B { int8_t b[]; };
+layout(binding = 2) writeonly buffer C { int c[]; };
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    i8vec4 x = i8vec4(a[4*i], a[4*i+1], a[4*i+2], a[4*i+3]);
+    i8vec4 y = i8vec4(b[4*i], b[4*i+1], b[4*i+2], b[4*i+3]);
+    c[i] = dotEXT(x, y);                 // 4x int8 MAC -> int32
+    // c[i] = dotAccSatEXT(x, y, c[i]);  // accumulating-saturating variant
+}
