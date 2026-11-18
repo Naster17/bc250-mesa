@@ -76,3 +76,32 @@ because the instructions are RDNA3+. The only extra hardware capability is
 **int4 dot8**, which needs a custom SPIR-V kernel (no Vulkan feature). int16 dot2
 is fully usable today via `dotEXT` (hardware + driver + stock glslang all support
 it); ggml just has no int16 quant format consuming it yet.
+
+## What ggml already exploits (verified in the fork)
+
+- **int8 dot4**: MMQ matmul/matvec (`mul_mat_vecq.comp` / `mul_mmq*.comp`,
+  `GL_EXT_integer_dot_product` -> `OpSDot`). The ~4.3x MoE matvec / +30% pp win.
+- **fp16 dot2**: scalar flash-attention QK/PV dots use `dot_product()` from
+  `dot_product_funcs.glsl`, which lowers to `v_dot2_f32_f16` when `DOT2_F16` is
+  set (shader-gen sets it for the fp16 FA path; `device->dot2_f16` true on bc250).
+- **packed fp16 FMA**: `ACC_F16` path uses `f16vec2` packed `fma` (2x rate).
+- **int16 dot2**: available (`dotEXT(i16vec2,i16vec2)` -> `OpSDot`, verified) but
+  no ggml quant format consumes int16 operands, so unused.
+- **int4 dot8**: hardware present, but `v_dot8_i32_i4` is int4 x int4; ggml
+  activations are q8_1 (int8), so the operand types do not match -> no direct use.
+
+## Sweep of remaining `false` features (nothing else to enable)
+
+- `*NonUniformIndexingNative` = false on **all** RADV (emulated via waterfall
+  loops; not a gfx1013 gate, would need RADV implementation work).
+- fp16 buffer/shared atomics (`shaderBufferFloat16AtomicAdd`,
+  `shaderSharedFloat16AtomicAdd`, ...) = false; no ACO `ds_add_f16` opcode ->
+  hardware/ACO does not support fp16 atomic add.
+- `shaderBufferFloat32AtomicAdd` = gfx11-only opcode (confirmed).
+- mixed-signedness / int32 / int64 dot, bf16/fp8 dot, coopmat = RDNA3+ (correct).
+
+**Conclusion: every standard instruction/feature RDNA2 supports is already
+exposed by Mesa (after the int-dot patch) and already used by ggml where it
+applies. There is no further instruction-level feature to add. The remaining
+flint tg headroom is memory-bandwidth-bound (expert weight reads), not
+instruction-bound.**
