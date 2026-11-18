@@ -1,0 +1,31 @@
+#version 450
+// Reproducible proof that gfx1013 hardware dot writes ZERO.
+// Each lane outputs a pair: c[2*i] = hardware dot, c[2*i+1] = manual integer dot.
+// Run on the int-dot-ENABLED driver: hardware column is all 0, manual is correct.
+// Run on stock driver: both equal (dot lowered to software) -> positive control.
+//
+// Build: glslangValidator -V --target-env vulkan1.2 dot_hw_vs_manual.comp -o d.spv
+// Run with a compute runner that fills a[i]=(i%7)-3, b[i]=(i%5)-2 (int8) and
+// dumps c[0..15]. Requires shaderInt8 + 8bit storage + integerDotProduct features.
+#extension GL_EXT_integer_dot_product : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int8 : require
+layout(local_size_x = 32) in;
+layout(binding = 0) readonly buffer A { int8_t a[]; };
+layout(binding = 1) readonly buffer B { int8_t b[]; };
+layout(binding = 2) writeonly buffer C { int c[]; };
+int mdot(int pa, int pb) {
+    int s = 0;
+    for (int k = 0; k < 4; k++) {
+        int ba = (pa >> (8*k)) & 0xFF; if (ba >= 128) ba -= 256;
+        int bb = (pb >> (8*k)) & 0xFF; if (bb >= 128) bb -= 256;
+        s += ba * bb;
+    }
+    return s;
+}
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    int pa = pack32(i8vec4(a[4*i], a[4*i+1], a[4*i+2], a[4*i+3]));
+    int pb = pack32(i8vec4(b[4*i], b[4*i+1], b[4*i+2], b[4*i+3]));
+    c[2*i]   = dotPacked4x8EXT(pa, pb);   // hardware v_dot4_i32_i8
+    c[2*i+1] = mdot(pa, pb);              // software reference
+}

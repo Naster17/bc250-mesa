@@ -49,6 +49,19 @@ A standalone Vulkan compute shader doing `dotPacked4x8EXT` /
 `v_dot4_i32_i8` / `v_dot4c_i32_i8` for these — the hardware just does not execute
 them as dots.
 
+**Side-by-side proof** (`examples/dot_hw_vs_manual.comp`, one shader emits both
+hardware and manual dot per lane, inputs `a[i]=(i%7)-3`, `b[i]=(i%5)-2`):
+
+| Driver | int8 pairs (hw, manual) per lane | int16 pairs (hw, manual) |
+|--------|----------------------------------|--------------------------|
+| int-dot ENABLED | (0,8) (0,-5) (0,-5) (0,1) (0,6) (0,-4) (0,-4) (0,-5) | (0,8) (0,0) (0,-2) (0,-3) (0,-4) (0,-1) (0,3) (0,-2) |
+| STOCK (control) | (8,8) (-5,-5) (-5,-5) (1,1) (6,6) (-4,-4) (-4,-4) (-5,-5) | hw==manual (software) |
+
+ISA dump confirms `v_dot4_i32_i8` / `v_dot2_i32_i16` are emitted on the enabled
+driver. The manual column (same shader, same operands, same lanes) is correct;
+the hardware column is **zero in every lane**. On stock, dot is lowered to
+software so hw==manual — the positive control proving the harness is sound.
+
 The earlier "~4.3× MoE matvec, +30% pp" claim came from `test-backend-ops perf`
 (which times but does not check correctness) on the patched driver. Correctness
 had only been checked on the stock driver. **Retracted.**
