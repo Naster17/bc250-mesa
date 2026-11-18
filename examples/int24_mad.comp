@@ -1,0 +1,15 @@
+#version 450
+// INT24 multiply-add on gfx1013: full-rate (vs 1/4-rate v_mul_lo_u32).
+// VERIFIED working (v_mul_i32_i24 positive control). Operands must fit 24 bits.
+// ACO/LLVM emit v_mad_i32_i24 when the range is provable; this pattern hints it.
+#extension GL_EXT_shader_explicit_arithmetic_types_int32 : require
+layout(local_size_x = 64) in;
+layout(binding = 0) readonly buffer A { int a[]; };
+layout(binding = 1) readonly buffer B { int b[]; };
+layout(binding = 2) writeonly buffer C { int c[]; };
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    int x = a[i] & 0xFFFFFF;       // 24-bit range
+    int y = b[i] & 0xFFFFFF;
+    c[i] = x * y + int(i);         // -> v_mad_i32_i24 when range proven
+}

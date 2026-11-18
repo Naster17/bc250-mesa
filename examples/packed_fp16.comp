@@ -1,0 +1,19 @@
+#version 450
+// Packed FP16 FMA on gfx1013: f16vec2 fma -> v_pk_fma_f16 (2x FP32 rate).
+// VERIFIED working on BC-250 silicon (positive control). Needs shaderFloat16 +
+// 16bit storage. This is the real fp16 accelerator (NOT v_dot2_f32_f16, which
+// writes zero on gfx1013).
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+layout(local_size_x = 64) in;
+layout(binding = 0) readonly buffer A { float16_t a[]; };
+layout(binding = 1) readonly buffer B { float16_t b[]; };
+layout(binding = 2) buffer C { float16_t c[]; };
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    f16vec2 x = f16vec2(a[2*i], a[2*i+1]);
+    f16vec2 y = f16vec2(b[2*i], b[2*i+1]);
+    f16vec2 acc = f16vec2(c[2*i], c[2*i+1]);
+    acc = fma(x, y, acc);          // two FP16 FMAs per lane -> v_pk_fma_f16
+    c[2*i] = acc.x; c[2*i+1] = acc.y;
+}

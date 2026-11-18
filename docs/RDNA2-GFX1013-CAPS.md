@@ -1,107 +1,87 @@
-# RDNA2 / gfx1013 (AMD BC-250) capability audit
+# RDNA2 / gfx1013 (AMD BC-250) capability map — CORRECTED
 
-What the BC-250's GPU (CHIP_GFX1013, PS5 "Oberon", RDNA2-class / GFX10_3) actually
-supports, what Mesa/RADV exposes, and what is gated. Verified against the ACO
-opcode table (`src/amd/compiler/aco_opcodes.py`) and `vulkaninfo` on the patched
-driver.
+Supersedes the earlier version of this file, which wrongly claimed the int-dot
+patch enabled working hardware dot. See `GFX1013-DOT-HAZARD.md` for the evidence.
 
-## Dot-product instructions (the LLM-relevant ones)
+gfx1013 = PS5 "Oberon" / BC-250, a hybrid: GFX10.1 (RDNA1) ISA base + ray tracing,
+**not** full GFX10.3 (RX 6000) RDNA2. Many "RDNA2" instructions are absent or
+remapped on this part.
 
-| Instruction | ACO opcode | gfx10 encoding | RDNA2? | Vulkan exposure |
-|-------------|-----------|----------------|--------|-----------------|
-| int8 dot4 signed | `v_dot4_i32_i8` | 0x16 | YES | `integerDotProduct8BitSignedAccelerated` |
-| int8 dot4 unsigned | `v_dot4_u32_u8` | 0x17 | YES | `integerDotProduct8BitUnsignedAccelerated` |
-| int8 dot4 accumulate | `v_dot4c_i32_i8` | 0x0d | YES | (saturating accumulate variant) |
-| **int16 dot2 signed** | `v_dot2_i32_i16` | 0x14 | YES | `integerDotProduct16BitSignedAccelerated` |
-| **int16 dot2 unsigned** | `v_dot2_u32_u16` | 0x15 | YES | `integerDotProduct16BitUnsignedAccelerated` |
-| fp16 dot2 (f32 acc) | `v_dot2_f32_f16` | 0x13 | YES | `VK_VALVE_shader_mixed_float_dot_product` |
-| fp16 dot2 accumulate | `v_dot2c_f32_f16` | 0x02 | YES | (VALVE) |
-| **int4 dot8 signed** | `v_dot8_i32_i4` | 0x18 | YES | **NONE** (no 4-bit category in VK_KHR_shader_integer_dot_product) |
-| **int4 dot8 unsigned** | `v_dot8_u32_u4` | 0x19 | YES | **NONE** |
-| int8 mixed signedness (sudot) | `v_dot4_i32_iu8` | gfx11 only | NO | `...8BitMixedSignednessAccelerated = false` (correct) |
-| int4 mixed signedness | `v_dot8_i32_iu4` | gfx11 only | NO | false (correct) |
-| bf16 dot2 | `v_dot2_f32_bf16` | gfx11 only | NO | false (correct) |
-| fp8 dot4 | `v_dot4_f32_fp8_*` | gfx11_7 only | NO | false (correct) |
-| int32/int64 dot | — | none | NO | false (correct) |
+## Dot products — NOT functional (do not enable)
 
-Key point: the original Mesa bug was excluding **all** of GFX1013 from
-`has_accelerated_dot_product` (lumping it with RDNA1). The `bc250-mesa` patch
-removes that exclusion, enabling int8 dot4, int16 dot2 and fp16 dot2 — all of
-which the hardware has. The mixed-signedness/bf16/fp8 gates (`gfx11plus`) are
-**correct**: those instructions genuinely do not exist on RDNA2.
+| Instruction | Full RDNA2 (gfx1030) | gfx1013 silicon |
+|-------------|----------------------|-----------------|
+| `v_dot4_i32_i8` / `v_dot4_u32_u8` (int8 dot4) | works | **writes zero** |
+| `v_dot2_i32_i16` / `v_dot2_u32_u16` (int16 dot2) | works | **writes zero** |
+| `v_dot8_i32_i4` / `v_dot8_u32_u4` (int4 dot8) | works | **writes zero** |
+| `v_dot2_f32_f16` / `v_dot2c_f32_f16` (fp16 dot2) | works | **writes zero** |
+| `v_dot4c_i32_i8` (int8 dot4 accumulate) | works | **SI legacy float min** |
 
-## Other features (all already exposed on gfx1013)
+`has_accelerated_dot_product` must stay **false** for `CHIP_GFX1013`.
+`VK_KHR_shader_integer_dot_product` and `VK_VALVE_shader_mixed_float_dot_product`
+are correctly unavailable. Enabling them makes llama.cpp produce ERR≈1.0 garbage
+(verified). The stock Mesa exclusion is correct.
 
-- `shaderFloat16`, `shaderInt8`, `shaderInt16`, `shaderInt64` = true.
-- `shaderSubgroupExtendedTypes`, `subgroupSizeControl`, `shaderSubgroupRotate`,
-  `shaderSubgroupRotateClustered` = true (wave32/64).
-- `shaderSharedFloat32AtomicAdd` = true (LDS atomic add f32, GFX8+).
-- `shaderBufferFloat32Atomics` = true (exchange/min/max), but
-  **`shaderBufferFloat32AtomicAdd` = false** — `buffer_atomic_add_f32` is a
-  **gfx11-only** opcode (0x56). RDNA2 has no buffer atomic-add-f32 instruction,
-  so atomic-float split-K via buffer atomics is NOT possible here. (Shared/LDS
-  atomic add f32 works, but that is workgroup memory, not device buffers.)
-- `VK_VALVE_shader_mixed_float_dot_product` = enabled (via the int-dot patch).
-- Cooperative matrix / WMMA: **none** (RDNA3+). `matrix cores: none` is correct.
+Note: this also means the FP16 `dot2` path (`v_dot2_f32_f16`) is NOT a usable
+accelerator on gfx1013, despite being a real RDNA2 instruction. llama.cpp's
+`DOT2_F16` codegen must not be relied on here; the packed-FMA fp16 path below is
+the working one.
 
-## Untapped hardware instruction: int4 dot8
+## Packed / mixed / integer math — WORKING (positive controls)
 
-`v_dot8_i32_i4` / `v_dot8_u32_u4` exist on RDNA2 (gfx10 0x18/0x19) but have **no
-Vulkan feature** exposing them (the integer-dot-product extension only covers
-8/16/32/64-bit). To use them you must emit the SPIR-V opcode directly (custom
-shader, ACO will lower it to the gfx10 instruction). Potential: 8 int4 lanes per
-instruction vs 4 int8 lanes — relevant to Q4_0/Q4_K matvec if a custom kernel
-packs nibbles into the dot operands. This is a llama.cpp shader project, not a
-Mesa feature toggle.
+| Instruction | Rate vs FP32 | Use | Exposure |
+|-------------|--------------|-----|----------|
+| `v_pk_fma_f16`, `v_pk_add/mul/min/max_f16` | 2× | packed FP16 FMA | `VK_KHR_shader_float16_int8` + `VK_KHR_16bit_storage`; HIP half2 |
+| `v_pk_add_i16`, `v_pk_mul_lo_u16`, `v_pk_*_i16` | 2× | packed INT16 | shaderInt16 + 16bit storage; HIP short2 |
+| `v_fma_mix_f32`, `v_fma_mixlo/mixhi_f16` | 1× (free f16→f32) | mixed precision | shader float16; compiler autogen |
+| `v_mul_i32_i24`, `v_mad_i32_i24` | 1× (vs 1/4× int32 mul) | INT24 address/scale math | compiler autogen; HIP `__builtin_amdgcn_mad_i32_i24` |
+| `v_add3_u32`, `v_lshl_add_u32`, `v_and_or_b32`, `v_or3_b32` | 1× | 3-input address/bit math | compiler autogen |
+| `v_bfe_u32/i32`, `v_bfi_b32`, `v_perm_b32`, `v_alignbyte_b32` | 1× | quant nibble/byte unpack, LUT | compiler autogen from shifts/masks; HIP `__builtin_amdgcn_perm`/`bfe` |
+| SDWA (byte/word sub-dword addressing) | — | unpack without shifts | compiler autogen |
+| `v_cvt_pkrtz_f16_f32`, `v_pack_b32_f16`, `v_cvt_pk_u8_f32`, `v_cvt_pk_i16_f32` | 1× | packed conversions / quantize | compiler autogen |
+| `v_sad_u8`, `v_qsad_pk_u16_u8`, `v_mqsad_u32_u8`, `v_lerp_u8` | 1× | SAD / motion estimation | HIP `__builtin_amdgcn_sad` |
 
-## GLSL toolchain note (int16 dot2)
+## Cross-lane / subgroup — WORKING
 
-- `GL_EXT_integer_dot_product` (glslang) lowers int8 dot4 to `OpSDot`/`OpUDot`
-  (SPV_KHR_integer_dot_product). ggml's MMQ shaders use this and work (~4.3x).
-- int16 dot2 in GLSL uses **`dotEXT(i16vec2, i16vec2)`** from
-  `GL_EXT_integer_dot_product` (NOT `dot()` — that resolves to the float builtin
-  and is ambiguous; there is no `GL_KHR_shader_integer_dot_product` GLSL
-  extension). Verified: stock Alpine glslang 16.2 emits `OpSDot` +
-  `DotProductInputAll`, `spirv-val --target-env vulkan1.2` passes. No toolchain
-  upgrade needed. `dotAccSatEXT` gives the accumulating-saturating form.
-- ggml targets `--target-env=vulkan1.2` (SPIR-V 1.5 + SPV_KHR_integer_dot_product);
-  coopmat2 shaders use vulkan1.3.
+| Instruction | Use | Exposure |
+|-------------|-----|----------|
+| DPP16 (row shift/bcast/quad_perm/butterfly) | wave reductions, softmax/norm | subgroup ops; HIP `__builtin_amdgcn_mov_dpp`/`update_dpp` |
+| DPP8 (gfx10 8-lane swizzle) | fine-grained shuffle | HIP `__builtin_amdgcn_mov_dpp8` |
+| `v_permlane16_b32`, `v_permlanex16_b32` | cross-16-lane exchange | subgroup shuffle; HIP `__builtin_amdgcn_permlane16` |
+| `ds_bpermute_b32`, `ds_permute_b32`, `ds_swizzle_b32` | full-wave gather/scatter | subgroup ops; HIP `__shfl`/`ds_bpermute` |
+| `v_readfirstlane_b32`, `v_readlane_b32`, `v_mbcnt_lo_u32_b32` | VGPR→SGPR, compaction | compiler autogen |
+
+## Memory / cache
+
+- D16 loads (`global_load_short_d16`, `global_load_ubyte_d16`, ...) load 8/16-bit
+  straight into a VGPR half — fewer registers, no unpack.
+- `s_clause` groups consecutive VMEM/SMEM loads (GFX10+) — better weight streaming.
+- Separate `s_waitcnt` vmcnt/vscnt — finer memory latency hiding.
+- GLC/SLC/DLC cache flags; `s_inst_prefetch`.
+- LDS: 128 KB/WGP, `ds_read_b128`/`ds_write_b128`, `ds_add_f32` (FP32 LDS atomic
+  add works). **Global `atomic_add_f32` is RDNA3+** (absent here); global
+  fmin/fmax/fcmpswap exist.
+- **No Infinity Cache on BC-250** (that's discrete RX 6000; the APU shares GDDR6).
+
+## Absent on gfx1013 (RDNA3+/CDNA only)
+
+- BF16 (`v_dot2_f32_bf16`, packed bf16), FP8 dot, WMMA/cooperative matrix.
+- Global buffer `atomic_add_f32` (`buffer_atomic_add_f32` is gfx11).
+- fp16 buffer/shared atomics (no ACO `ds_add_f16`).
+- True16 (independent 16-bit register halves) — RDNA3.
+- `*NonUniformIndexingNative` — false on all RADV (emulated), not gfx1013-specific.
+
+## Ray tracing
+
+`image_bvh_intersect_ray` / `image_bvh64_intersect_ray` present (the RT addition
+that distinguishes gfx1013 from plain GFX10.1). `VK_KHR_ray_query` /
+`ray_tracing_pipeline`. Not relevant to LLM compute.
 
 ## Bottom line
 
-After the bc250-mesa int-dot patch, Mesa exposes **everything standard that
-RDNA2 supports**. There is no further standard feature to "unlock" — the
-remaining gates (sudot/bf16/fp8/buffer-atomic-add-f32/coopmat) are correct
-because the instructions are RDNA3+. The only extra hardware capability is
-**int4 dot8**, which needs a custom SPIR-V kernel (no Vulkan feature). int16 dot2
-is fully usable today via `dotEXT` (hardware + driver + stock glslang all support
-it); ggml just has no int16 quant format consuming it yet.
-
-## What ggml already exploits (verified in the fork)
-
-- **int8 dot4**: MMQ matmul/matvec (`mul_mat_vecq.comp` / `mul_mmq*.comp`,
-  `GL_EXT_integer_dot_product` -> `OpSDot`). The ~4.3x MoE matvec / +30% pp win.
-- **fp16 dot2**: scalar flash-attention QK/PV dots use `dot_product()` from
-  `dot_product_funcs.glsl`, which lowers to `v_dot2_f32_f16` when `DOT2_F16` is
-  set (shader-gen sets it for the fp16 FA path; `device->dot2_f16` true on bc250).
-- **packed fp16 FMA**: `ACC_F16` path uses `f16vec2` packed `fma` (2x rate).
-- **int16 dot2**: available (`dotEXT(i16vec2,i16vec2)` -> `OpSDot`, verified) but
-  no ggml quant format consumes int16 operands, so unused.
-- **int4 dot8**: hardware present, but `v_dot8_i32_i4` is int4 x int4; ggml
-  activations are q8_1 (int8), so the operand types do not match -> no direct use.
-
-## Sweep of remaining `false` features (nothing else to enable)
-
-- `*NonUniformIndexingNative` = false on **all** RADV (emulated via waterfall
-  loops; not a gfx1013 gate, would need RADV implementation work).
-- fp16 buffer/shared atomics (`shaderBufferFloat16AtomicAdd`,
-  `shaderSharedFloat16AtomicAdd`, ...) = false; no ACO `ds_add_f16` opcode ->
-  hardware/ACO does not support fp16 atomic add.
-- `shaderBufferFloat32AtomicAdd` = gfx11-only opcode (confirmed).
-- mixed-signedness / int32 / int64 dot, bf16/fp8 dot, coopmat = RDNA3+ (correct).
-
-**Conclusion: every standard instruction/feature RDNA2 supports is already
-exposed by Mesa (after the int-dot patch) and already used by ggml where it
-applies. There is no further instruction-level feature to add. The remaining
-flint tg headroom is memory-bandwidth-bound (expert weight reads), not
-instruction-bound.**
+The usable compute accelerators on gfx1013 are **packed FP16, mixed-precision
+FMA, INT24, bit/byte unpack (BFE/PERM/SDWA), and DPP/permlane subgroup ops** —
+all reached by compiler generation tests, no Mesa patch required. The dot
+instructions are a hazard, not a feature. llama.cpp's FP16 path already uses the
+working packed/mix instructions; its integer-dot MMQ path must stay disabled on
+this chip (stock Mesa does this correctly).

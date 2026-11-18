@@ -41,7 +41,9 @@ if [ ! -d "$MESA_DIR/.git" ] && [ ! -f "$MESA_DIR/meson.build" ]; then
     fi
 fi
 
-# 2. Apply BC-250 patches (idempotent: skip if already applied).
+# 2. Apply patches if any (idempotent). NOTE: there are currently NO patches --
+#    stock Mesa is correct for gfx1013 (the int-dot enablement was harmful and
+#    removed; see docs/GFX1013-DOT-HAZARD.md). This builds a stock RADV driver.
 cd "$MESA_DIR"
 for p in "$HERE"/patches/*.patch; do
     [ -e "$p" ] || continue
