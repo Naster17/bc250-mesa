@@ -84,3 +84,18 @@ bc250-mesa/
 ## License
 
 MIT (this overlay). Mesa itself is MIT/X11-style.
+
+## Related
+
+- **`Naster17/llama250.cpp`** — the llama.cpp fork for BC-250 (Vulkan scalar
+  tuning, UMA mmap, RPC BF16 wire, flint pre-tokenizer, RPC reserve pre-split,
+  FA quant-KV staging). Universal launcher `scripts/llama250.sh` + scenarios in
+  `docs/SCENARIOS.md`. It uses the **stock** Mesa driver (int dot off) — correct
+  for gfx1013.
+
+## Status
+
+Research repo, not a patch set to apply. The one patch this repo once carried
+(int-dot enablement) was **retracted as harmful** and removed. Stock Mesa is the
+correct driver for gfx1013. The value here is the verified capability map and the
+dot-hazard evidence, so nobody re-enables the broken dot path.
