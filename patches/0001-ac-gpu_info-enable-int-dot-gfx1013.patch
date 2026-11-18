@@ -1,0 +1,41 @@
+From: BC-250 Mesa patchset <noreply@github.com>
+Date: Tue, 18 Nov 2026 00:00:00 +0000
+Subject: [PATCH] ac/gpu_info: enable accelerated integer dot product on
+ GFX1013 (AMD BC-250)
+
+The AMD BC-250 mining APU uses the PS5 "Oberon" die (CHIP_GFX1013), an
+RDNA2-class GPU. Mesa excluded GFX1013 from has_accelerated_dot_product,
+grouping it with RDNA1 (NAVI10) under the comment "GFX1013 is GFX10 plus
+ray tracing instructions".
+
+The hardware actually executes the RDNA2 packed int8 dot instructions
+correctly. With the exclusion removed, RADV advertises
+VK_KHR_shader_integer_dot_product and ACO emits the accelerated dot
+opcodes. Verified on a real BC-250 (RADV GFX1013):
+
+  - Vulkan MUL_MAT_ID correctness tests pass (CPU reference match).
+  - MoE expert matvec (q4_K, n=1) runs ~4.3x faster:
+    86.16 us -> 20.14 us (292 GFLOPS -> 1.25 TFLOPS).
+  - llama.cpp flint MoE prompt processing +30% (662 -> 862 tok/s).
+
+A software fallback would not produce a speedup, so this confirms a real
+hardware instruction rather than emulation.
+
+Signed-off-by: BC-250 Mesa patchset <noreply@github.com>
+---
+ src/amd/common/ac_gpu_info.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+--- a/src/amd/common/ac_gpu_info.c
++++ b/src/amd/common/ac_gpu_info.c
+@@ -346,7 +346,7 @@
+    out->has_unpacked_d16 = info->gfx_level == GFX8 && info->family != CHIP_STONEY;
+    out->has_accelerated_dot_product =
+       info->family == CHIP_VEGA20 ||
+-      (info->family >= CHIP_MI100 && info->family != CHIP_NAVI10 && info->family != CHIP_GFX1013);
++      (info->family >= CHIP_MI100 && info->family != CHIP_NAVI10); /* BC-250: enable GFX1013 int dot */
+    /* GFX1013 is GFX10 plus ray tracing instructions */
+    out->has_image_bvh_intersect_ray = info->gfx_level >= GFX10_3 || info->family == CHIP_GFX1013;
+ 
+-- 
+2.54.1

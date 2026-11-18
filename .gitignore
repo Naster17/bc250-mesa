@@ -1,0 +1,6 @@
+# upstream Mesa checkout produced by build.sh
+/mesa/
+# build artifacts
+build/
+*.o
+*.so
